@@ -2,7 +2,7 @@
 name = "machine-learning-training-pipeline"
 version = "0.1.0"
 description = "A machine learning project to build build pipeline for training models
-authors = ["Paulo Marvin <mocked@example.com>"
+authors = ["Paulo Marvin <mocked@example.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
