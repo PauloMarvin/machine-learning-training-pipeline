@@ -1,11 +1,10 @@
 import typing
 from collections import OrderedDict
-from dataclasses import dataclass
 from typing import Tuple
 
 import joblib
 import pandas as pd
-from dataclasses_json import dataclass_json
+from pydantic import BaseModel
 from flytekit import Resources, task, workflow
 from flytekit.types.file import FlyteFile
 from flytekit.types.structured import StructuredDataset
@@ -73,11 +72,9 @@ def split_traintest_dataset(
 MODELSER_JOBLIB = typing.TypeVar("joblib.dat")
 
 
-@dataclass_json
-@dataclass
-class XGBoostModelHyperparams:
+class XGBoostModelHyperparams(BaseModel):
     """
-    These are the xgboost hyper parameters available in scikit-learn library.
+    These are the xgboost hyperparameters available in the scikit-learn library.
     """
 
     max_depth: int = 3
