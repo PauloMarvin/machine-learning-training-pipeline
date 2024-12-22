@@ -1,7 +1,6 @@
 import typing
 from collections import OrderedDict
 from typing import Tuple
-
 import joblib
 import pandas as pd
 from pydantic import BaseModel
@@ -12,6 +11,10 @@ from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
+# Constants
+TARGET_LABEL_INDEX = 8  # Index for the target label column ("class")
+
+# Dataset columns schema
 DATASET_COLUMNS = OrderedDict(
     {
         "#preg": int,
@@ -25,56 +28,71 @@ DATASET_COLUMNS = OrderedDict(
         "class": int,
     }
 )
-
-FEATURE_COLUMNS = OrderedDict(
-    {k: v for k, v in DATASET_COLUMNS.items() if k != "class"}
-)
-CLASSES_COLUMNS = OrderedDict({"class": int})
+FEATURE_COLUMNS = {
+    col: dtype for col, dtype in DATASET_COLUMNS.items() if col != "class"
+}
+CLASS_COLUMNS = {"class": int}
 
 
 @task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
-def split_traintest_dataset(
-    dataset: FlyteFile[typing.TypeVar("csv")], seed: int, test_split_ratio: float
-) -> Tuple[
-    StructuredDataset,
-    StructuredDataset,
-    StructuredDataset,
-    StructuredDataset,
-]:
+def split_train_test_dataset(
+    dataset_file: FlyteFile[typing.TypeVar("csv")], seed: int, test_split_ratio: float
+) -> Tuple[StructuredDataset, StructuredDataset, StructuredDataset, StructuredDataset]:
     """
-    Retrieves the training dataset from the given blob location and then splits
-    it using the split ratio and returns the result. The last column is assumed
-    to be the class, and all other columns 0-8 are features.
+    Splits a dataset CSV file into train and test sets for features and labels.
 
-    The data is returned as structured datasets.
+    Args:
+        dataset_file (FlyteFile): The CSV file containing the dataset.
+        seed (int): Random state seed for reproducibility.
+        test_split_ratio (float): Ratio of the test split.
+
+    Returns:
+        Tuple[StructuredDataset]: Training features, testing features, training labels, testing labels.
     """
-    column_names = [k for k in DATASET_COLUMNS.keys()]
-    df = pd.read_csv(dataset, names=column_names)
+    column_names = list(DATASET_COLUMNS.keys())
+    df = pd.read_csv(dataset_file, names=column_names)
 
-    # Select all features
-    x = df[column_names[:8]]
-    # Select only the classes
-    y = df[[column_names[-1]]]
+    # Extract features and labels
+    features_df = df.iloc[:, :TARGET_LABEL_INDEX]
+    labels_df = df.iloc[:, [TARGET_LABEL_INDEX]]
 
-    # split data into train and test sets
-    x_train, x_test, y_train, y_test = train_test_split(
-        x, y, test_size=test_split_ratio, random_state=seed
+    # Use helper function to split data
+    train_features, test_features, train_labels, test_labels = split_data(
+        features_df, labels_df, seed, test_split_ratio
     )
 
     return (
-        StructuredDataset(dataframe=x_train),
-        StructuredDataset(dataframe=x_test),
-        StructuredDataset(dataframe=y_train),
-        StructuredDataset(dataframe=y_test),
+        StructuredDataset(dataframe=train_features),
+        StructuredDataset(dataframe=test_features),
+        StructuredDataset(dataframe=train_labels),
+        StructuredDataset(dataframe=test_labels),
     )
 
 
-MODELSER_JOBLIB = typing.TypeVar("joblib.dat")
+def split_data(
+    features: pd.DataFrame, labels: pd.DataFrame, seed: int, test_split_ratio: float
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Helper method for splitting features and labels into training and testing datasets.
+
+    Args:
+        features (pd.DataFrame): Input features DataFrame.
+        labels (pd.DataFrame): Input labels DataFrame.
+        seed (int): Random seed for reproducibility.
+        test_split_ratio (float): Train-test split ratio.
+
+    Returns:
+        Tuple[pd.DataFrame]: Training and testing datasets for features and labels.
+    """
+    return train_test_split(
+        features, labels, test_size=test_split_ratio, random_state=seed
+    )
 
 
+# Model hyperparameter definitions
 class XGBoostModelHyperparams(BaseModel):
     """
-    These are the xgboost hyperparameters available in the scikit-learn library.
+    These are the XGBoost hyperparameters available in the scikit-learn library.
     """
 
     max_depth: int = 3
@@ -85,6 +103,8 @@ class XGBoostModelHyperparams(BaseModel):
     n_jobs: int = 1
 
 
+# Model artifact and workflow outputs
+MODELSER_JOBLIB = typing.TypeVar("joblib.dat")
 model_file = typing.NamedTuple("Model", model=FlyteFile[MODELSER_JOBLIB])
 workflow_outputs = typing.NamedTuple(
     "WorkflowOutputs", model=FlyteFile[MODELSER_JOBLIB], accuracy=float
@@ -92,19 +112,27 @@ workflow_outputs = typing.NamedTuple(
 
 
 @task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
-def fit(
-    x: StructuredDataset,
-    y: StructuredDataset,
+def train_model(
+    features: StructuredDataset,
+    labels: StructuredDataset,
     hyperparams: XGBoostModelHyperparams,
 ) -> model_file:
     """
-    This function takes the given input features and their corresponding classes to train a XGBClassifier.
-    """
-    x_df = x.open().all()
-    y_df = y.open().all()
+    Trains an XGBoost classifier on the provided features and labels, and outputs the serialized model file.
 
-    # fit model on training data
-    m = XGBClassifier(
+    Args:
+        features (StructuredDataset): Structured dataset of features for training.
+        labels (StructuredDataset): Structured dataset of labels for training.
+        hyperparams (XGBoostModelHyperparams): Hyperparameters for the XGBoost classifier.
+
+    Returns:
+        model_file: A named tuple containing the serialized model file.
+    """
+    features_df = features.open(dataframe_type=pd.DataFrame).all()
+    labels_df = labels.open(dataframe_type=pd.DataFrame).all()
+
+    # Initialize and fit the model
+    model = XGBClassifier(
         n_jobs=hyperparams.n_jobs,
         max_depth=hyperparams.max_depth,
         n_estimators=hyperparams.n_estimators,
@@ -112,67 +140,95 @@ def fit(
         objective=hyperparams.objective,
         learning_rate=hyperparams.learning_rate,
     )
-    m.fit(x_df, y_df)
+    model.fit(features_df, labels_df)
 
-    # Serialize model as a file
-    fname = "model.joblib.dat"
-    joblib.dump(m, fname)
-    return (fname,)
+    # Serialize the model
+    model_filename = "model.joblib.dat"
+    joblib.dump(model, model_filename)
+    return (model_filename,)
 
 
 @task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
-def predict(
-    x: StructuredDataset,
-    model_ser: FlyteFile[MODELSER_JOBLIB],
+def make_predictions(
+    features: StructuredDataset,
+    model_file: FlyteFile[MODELSER_JOBLIB],
 ) -> StructuredDataset:
     """
-    Given a trained model (serialized using joblib) and features, this method returns predictions.
-    """
-    model = joblib.load(model_ser)
-    x_df = x.open().all()
-    y_pred = model.predict(x_df)
+    Predicts labels using the trained model and provided features.
 
-    y_pred_df = pd.DataFrame(y_pred, columns=["class"], dtype="int64")
-    return StructuredDataset(dataframe=y_pred_df)
+    Args:
+        features (StructuredDataset): Input features for prediction.
+        model_file (FlyteFile): Serialized model file.
+
+    Returns:
+        StructuredDataset: Predictions as a structured dataset.
+    """
+    model = joblib.load(model_file)
+    features_df = features.open(dataframe_type=pd.DataFrame).all()
+    predictions = model.predict(features_df)
+
+    # Return predictions as a DataFrame
+    predictions_df = pd.DataFrame(predictions, columns=["class"], dtype="int64")
+    return StructuredDataset(dataframe=predictions_df)
 
 
 @task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
-def score(predictions: StructuredDataset, y: StructuredDataset) -> float:
+def calculate_accuracy(
+    predictions: StructuredDataset, actual_labels: StructuredDataset
+) -> float:
     """
-    Compares the predictions with the actuals and returns the accuracy score.
+    Calculates the accuracy score of the predictions against the actual labels.
+
+    Args:
+        predictions (StructuredDataset): Predicted labels.
+        actual_labels (StructuredDataset): Ground truth labels.
+
+    Returns:
+        float: Accuracy score as a floating-point number.
     """
-    pred_df = predictions.open().all()
-    y_df = y.open().all()
-    # evaluate predictions
-    acc = accuracy_score(y_df, pred_df)
-    print("Accuracy: %.2f%%" % (acc * 100.0))
-    return float(acc)
+    predictions_df = predictions.open(dataframe_type=pd.DataFrame).all()
+    actual_labels_df = actual_labels.open(dataframe_type=pd.DataFrame).all()
+
+    # Evaluate accuracy
+    accuracy = accuracy_score(actual_labels_df, predictions_df)
+    print(f"Accuracy: {accuracy:.2%}")
+    return float(accuracy)
 
 
 @workflow
-def diabetes_xgboost_model(
-    dataset: FlyteFile[
+def diabetes_xgboost_pipeline(
+    dataset_file: FlyteFile[
         typing.TypeVar("csv")
     ] = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv",
     test_split_ratio: float = 0.33,
     seed: int = 7,
 ) -> workflow_outputs:
     """
-    This pipeline trains an XGBoost model for any given dataset that matches the schema as specified in
-    https://github.com/jbrownlee/Datasets/blob/master/pima-indians-diabetes.names.
+    Main Flyte workflow that trains an XGBoost model on the provided dataset, evaluates it, and returns the results.
+
+    Args:
+        dataset_file (FlyteFile): Dataset file containing the diabetes data.
+        test_split_ratio (float): Ratio for test dataset split.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        workflow_outputs: Named tuple containing the serialized model and accuracy score.
     """
-    x_train, x_test, y_train, y_test = split_traintest_dataset(
-        dataset=dataset, seed=seed, test_split_ratio=test_split_ratio
+    train_features, test_features, train_labels, test_labels = split_train_test_dataset(
+        dataset_file=dataset_file, seed=seed, test_split_ratio=test_split_ratio
     )
-    model = fit(
-        x=x_train,
-        y=y_train,
+    trained_model = train_model(
+        features=train_features,
+        labels=train_labels,
         hyperparams=XGBoostModelHyperparams(max_depth=4),
     )
-    predictions = predict(x=x_test, model_ser=model.model)
-    return model.model, score(predictions=predictions, y=y_test)
+    predictions = make_predictions(
+        features=test_features, model_file=trained_model.model
+    )
+    accuracy = calculate_accuracy(predictions=predictions, actual_labels=test_labels)
+    return trained_model.model, accuracy
 
 
 if __name__ == "__main__":
-    print(f"Running {__file__} main...")
-    print(diabetes_xgboost_model())
+    print("Running main pipeline...")
+    print(diabetes_xgboost_pipeline())
