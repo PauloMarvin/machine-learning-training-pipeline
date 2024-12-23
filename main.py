@@ -1,11 +1,12 @@
 from collections import OrderedDict
-from typing import Tuple, Literal, NamedTuple
+from typing import Literal, NamedTuple, Tuple
+
 import joblib
 import pandas as pd
-from pydantic import BaseModel
 from flytekit import Resources, task, workflow
 from flytekit.types.file import FlyteFile
 from flytekit.types.structured import StructuredDataset
+from pydantic import BaseModel
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
@@ -70,7 +71,6 @@ class XGBoostModelHyperparams(BaseModel):
     objective: str = "binary:logistic"
     booster: str = "gbtree"
     n_jobs: int = 1
-
 
 
 def split_data(
@@ -245,8 +245,11 @@ def calculate_accuracy(
     print(f"Accuracy: {accuracy:.2%}")
     return float(accuracy)
 
+
 workflow_outputs = NamedTuple(
-    "WorkflowOutputs", model=FlyteFile[Literal["csv"]], accuracy=float)
+    "WorkflowOutputs", model=FlyteFile[Literal["csv"]], accuracy=float
+)
+
 
 @workflow
 def diabetes_xgboost_pipeline(
