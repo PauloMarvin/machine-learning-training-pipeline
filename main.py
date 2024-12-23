@@ -1,6 +1,5 @@
-import typing
 from collections import OrderedDict
-from typing import Tuple
+from typing import Tuple, Literal, NamedTuple
 import joblib
 import pandas as pd
 from pydantic import BaseModel
@@ -12,9 +11,8 @@ from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
 # Constants
-TARGET_LABEL_INDEX = 8  # Index for the target label column ("class")
+TARGET_LABEL_INDEX = 8
 
-# Dataset columns schema
 DATASET_COLUMNS = OrderedDict(
     {
         "#preg": int,
@@ -34,24 +32,93 @@ FEATURE_COLUMNS = {
 CLASS_COLUMNS = {"class": int}
 
 
-@task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
+class XGBoostModelHyperparams(BaseModel):
+    """
+    Handles the storage and management of hyperparameters for an XGBoost model.
+    This class is a schema definition using Pydantic's BaseModel to define and
+    validate the hyperparameters required to configure an XGBoost model.
+
+    This class is intended for use in scenarios where the user needs to configure
+    the hyperparameters of an XGBoost model programmatically, ensure validity
+    of input values, and manage default settings.
+
+    :ivar max_depth: The maximum depth of a tree. Controls overfitting; larger
+        values allow the model to capture more complex patterns but may result
+        in overfitting.
+    :type max_depth: int
+    :ivar learning_rate: Boosting learning rate (also known as eta). Determines
+        the contribution of each tree to the model; smaller values make the
+        optimization process more stable at the cost of longer training time.
+    :type learning_rate: float
+    :ivar n_estimators: The number of boosting rounds or trees in the model.
+        Controls the number of iterations of model training.
+    :type n_estimators: int
+    :ivar objective: The learning task objective. Defines the loss function to
+        be minimized, such as "binary:logistic" for binary classification.
+    :type objective: str
+    :ivar booster: The booster type to use, such as "gbtree" (default) for tree-based
+        models or "gblinear" for linear models.
+    :type booster: str
+    :ivar n_jobs: The number of parallel threads to use for model training. Controls
+        the level of parallelism in training; -1 means using all processors.
+    :type n_jobs: int
+    """
+
+    max_depth: int = 3
+    learning_rate: float = 0.1
+    n_estimators: int = 100
+    objective: str = "binary:logistic"
+    booster: str = "gbtree"
+    n_jobs: int = 1
+
+
+
+def split_data(
+    features: pd.DataFrame, labels: pd.DataFrame, seed: int, test_split_ratio: float
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the provided dataset into training and testing subsets based on the specified
+    test split ratio and random seed. This function is designed to work with datasets
+    represented as Pandas DataFrame objects for both features and labels, ensuring
+    compatibility with a wide range of data preprocessing workflows.
+
+    :param features: A Pandas DataFrame containing the feature data of the dataset, where
+        each row represents an instance and each column represents a feature.
+    :param labels: A Pandas DataFrame containing the label data of the dataset, where each
+        row corresponds to the label(s) of the corresponding instance in the features.
+    :param seed: An integer used to seed the random number generator for reproducibility
+        when splitting the dataset into training and testing subsets.
+    :param test_split_ratio: A float in the range (0, 1) that specifies the proportion of
+        the dataset to be allocated to the testing set.
+    :return: A tuple containing four Pandas DataFrames: the training feature set, the
+        testing feature set, the training label set, and the testing label set, in that
+        order.
+    """
+    return train_test_split(
+        features, labels, test_size=test_split_ratio, random_state=seed
+    )
+
+
+@task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
 def split_train_test_dataset(
-    dataset_file: FlyteFile[typing.TypeVar("csv")], seed: int, test_split_ratio: float
+    dataset_file: FlyteFile[Literal["csv"]], seed: int, test_split_ratio: float
 ) -> Tuple[StructuredDataset, StructuredDataset, StructuredDataset, StructuredDataset]:
     """
-    Splits a dataset into training and testing subsets for both features and labels. This
-    function reads the provided dataset file, extracts feature and label columns, and
-    divides the data into training and testing sets based on the specified test split ratio
-    and random seed. The function ensures reproducibility through the provided seed value.
+    Splits a dataset into training and testing subsets for both features and labels. The dataset is
+    provided as a file, and this function utilizes randomness controlled by a seed value to split
+    the data based on the specified ratio. The function outputs structured datasets for training
+    features, test features, training labels, and test labels respectively.
 
-    :param dataset_file: Path to the dataset file in CSV format to be read as input.
-    :param seed: Random seed for reproducibility when splitting the data.
-    :param test_split_ratio: Proportion of the dataset to be used as the testing set.
-    :return: A tuple containing four separate structured datasets:
-        - Training features dataset.
-        - Testing features dataset.
-        - Training labels dataset.
-        - Testing labels dataset.
+    :param dataset_file: The input dataset file in CSV format containing feature columns and a
+        label column. It is expected to match the structure defined in the DATASET_COLUMNS dictionary.
+    :param seed: The random seed used to control the reproducibility of the train-test split process.
+    :param test_split_ratio: A float value representing the proportion of the dataset to include in
+        the test split. Must be a value between 0 and 1.
+    :return: A tuple containing four StructuredDataset objects:
+        - Training features
+        - Test features
+        - Training labels
+        - Test labels
     """
     column_names = list(DATASET_COLUMNS.keys())
     df = pd.read_csv(dataset_file, names=column_names)
@@ -73,97 +140,33 @@ def split_train_test_dataset(
     )
 
 
-def split_data(
-    features: pd.DataFrame, labels: pd.DataFrame, seed: int, test_split_ratio: float
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Splits the dataset into training and testing sets.
-
-    This function takes the features and labels of a dataset,
-    along with a random seed and the test split ratio, and splits the
-    data into training and testing subsets. It ensures reproducibility of
-    the split using the provided seed and allows for control over the
-    proportion of the dataset allocated for testing using the test_split_ratio parameter.
-    The split is performed such that the features and labels are partitioned
-    consistently.
-
-    :param features: The input features of the dataset to be split.
-    :param labels: The corresponding labels of the dataset to be split.
-    :param seed: An integer seed value for ensuring reproducibility of the data split.
-    :param test_split_ratio: A float representing the proportion of the dataset
-        to be allocated to the testing set.
-    :return: A tuple containing four DataFrames:
-        (X_train, X_test, y_train, y_test) where X_train and y_train correspond to
-        the training data and labels respectively, and X_test and y_test correspond
-        to the testing data and labels respectively.
-    """
-    return train_test_split(
-        features, labels, test_size=test_split_ratio, random_state=seed
-    )
-
-
-# Model hyperparameter definitions
-class XGBoostModelHyperparams(BaseModel):
-    """
-    Represents the hyperparameters for an XGBoost model configuration.
-
-    This class is a data model used to specify the set of hyperparameters for an
-    XGBoost model. It is primarily utilized to configure the model behavior,
-    allowing customization of attributes like maximum tree depth, learning rate,
-    number of boosting rounds, and more. This class is useful for applications
-    involving supervised machine learning with XGBoost where hyperparameter tuning
-    is necessary.
-
-    :ivar max_depth: The maximum depth for each tree in the XGBoost model.
-    :type max_depth: int
-    :ivar learning_rate: Step size shrinkage used to prevent overfitting.
-    :type learning_rate: float
-    :ivar n_estimators: The number of boosting rounds (trees) to be built.
-    :type n_estimators: int
-    :ivar objective: The learning objective for the model (e.g., regression or classification tasks).
-    :type objective: str
-    :ivar booster: Specifies the type of booster to use in the model (e.g., 'gbtree', 'gblinear').
-    :type booster: str
-    :ivar n_jobs: The number of parallel threads used to run XGBoost.
-    :type n_jobs: int
-    """
-
-    max_depth: int = 3
-    learning_rate: float = 0.1
-    n_estimators: int = 100
-    objective: str = "binary:logistic"
-    booster: str = "gbtree"
-    n_jobs: int = 1
-
-
 # Model artifact and workflow outputs
-MODELSER_JOBLIB = typing.TypeVar("joblib.dat")
-model_file = typing.NamedTuple("Model", model=FlyteFile[MODELSER_JOBLIB])
-workflow_outputs = typing.NamedTuple(
-    "WorkflowOutputs", model=FlyteFile[MODELSER_JOBLIB], accuracy=float
-)
+# MODELSER_JOBLIB = typing.TypeVar("joblib.dat")
+# model_file = typing.NamedTuple("Model", model=FlyteFile[MODELSER_JOBLIB])
+model_file = NamedTuple("Model", model=FlyteFile[Literal["joblib.dat"]])
 
 
-@task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
+@task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
 def train_model(
     features: StructuredDataset,
     labels: StructuredDataset,
     hyperparams: XGBoostModelHyperparams,
-) -> model_file:
+) -> FlyteFile[Literal["joblib.dat"]]:
     """
-    Train a machine learning model using XGBoost with the supplied features, labels, and hyperparameters.
-    The training process includes initializing an XGBoost classifier, fitting the model with input data,
-    and serializing the trained model to a file for future use.
+    Train a machine learning model using features and labels from structured datasets.
+    This function initializes an XGBoost classifier with given hyperparameters, fits
+    the model, and serializes it to a file. It is optimized for resource constraints
+    and caching.
 
-    :param features: Input dataset containing the features to be used for training the model.
+    :param features: Input feature dataset in a structured format.
     :type features: StructuredDataset
-    :param labels: Input dataset containing the corresponding labels for the training features.
+    :param labels: Target label dataset in a structured format.
     :type labels: StructuredDataset
-    :param hyperparams: Hyperparameters for the XGBoost model specifying configuration such as
-        the number of estimators, maximum depth, learning rate, and other model-specific parameters.
+    :param hyperparams: Configuration object containing hyperparameters for the
+        XGBoost classifier.
     :type hyperparams: XGBoostModelHyperparams
-    :return: Tuple containing the filepath of the serialized model file.
-    :rtype: tuple
+    :return: The file path to the serialized trained model.
+    :rtype: model_file
     """
     features_df = features.open(dataframe_type=pd.DataFrame).all()
     labels_df = labels.open(dataframe_type=pd.DataFrame).all()
@@ -182,29 +185,30 @@ def train_model(
     # Serialize the model
     model_filename = "model.joblib.dat"
     joblib.dump(model, model_filename)
-    return (model_filename,)
+
+    return FlyteFile[Literal["joblib.dat"]](path=model_filename)
 
 
-@task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
+@task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
 def make_predictions(
     features: StructuredDataset,
-    model_file: FlyteFile[MODELSER_JOBLIB],
+    model_file: FlyteFile[Literal["joblib.dat"]],
 ) -> StructuredDataset:
     """
-    This function makes predictions using a pre-trained model. It takes a dataset of
-    features and a serialized model file, loads the model, and applies it to the
-    input features to generate predictions. The predictions are then returned in a
-    structured dataset format, encapsulated as a DataFrame.
+    Makes predictions based on the input features using a pre-trained model. This function
+    loads a machine learning model from the provided serialized model file, processes the
+    input features, and generates predictions. The predictions are returned as a
+    structured dataset in DataFrame format.
 
-    :param features: A structured dataset containing the features to be used as input
-        for the model. This dataset is expected to be loaded as a pandas DataFrame.
+    :param features: Input structured dataset containing the features required for
+        generating predictions. The dataset is expected to represent rows of data for
+        prediction purposes.
     :type features: StructuredDataset
-    :param model_file: A FlyteFile containing the serialized model. The model file should
-        be in the MODELSER_JOBLIB format and compatible with `joblib.load`.
+    :param model_file: Serialized file containing a pre-trained machine learning model.
+        The model must be stored in `joblib` format and compatible with the features.
     :type model_file: FlyteFile[MODELSER_JOBLIB]
-    :return: A structured dataset containing the predictions as a pandas DataFrame.
-        Each row represents a prediction for the corresponding row in the input features
-        dataset and includes a single column "class" with the predicted class labels.
+    :return: A structured dataset containing predicted classes as a DataFrame with
+        a single column labeled "class".
     :rtype: StructuredDataset
     """
     model = joblib.load(model_file)
@@ -216,26 +220,22 @@ def make_predictions(
     return StructuredDataset(dataframe=predictions_df)
 
 
-@task(cache_version="1.0", cache=True, limits=Resources(mem="200Mi"))
+@task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
 def calculate_accuracy(
     predictions: StructuredDataset, actual_labels: StructuredDataset
 ) -> float:
     """
-    Calculate the accuracy of model predictions against actual labels.
+    Calculate the accuracy of predictions against the actual labels using a structured dataset.
 
-    This function compares the predictions provided in a structured dataset with
-    the actual labels in another structured dataset, calculating the accuracy
-    score using a standard evaluation metric. The result is returned as a
-    floating-point number representing the accuracy percentage.
+    This function compares the predicted labels to the actual labels provided,
+    and computes the accuracy as a float value representing the percentage of correct predictions.
 
-    :param predictions: A structured dataset containing the model predictions.
-        The dataset is expected to be compatible with a DataFrame format.
-    :param actual_labels: A structured dataset containing the ground truth
-        actual labels. The dataset is expected to be compatible with a
-        DataFrame format.
-    :return: The computed accuracy score as a floating-point number,
-        representing the agreement between the predictions and
-        actual labels as a percentage.
+    :param predictions: A structured dataset containing the predicted labels. The type of data should align
+        with pandas DataFrame standards for further processing.
+    :param actual_labels: A structured dataset containing the actual labels to compare against. The type
+        of data should align with pandas DataFrame standards for further processing.
+    :return: The accuracy score as a float, representing the proportion of correct predictions over the
+        total labels.
     """
     predictions_df = predictions.open(dataframe_type=pd.DataFrame).all()
     actual_labels_df = actual_labels.open(dataframe_type=pd.DataFrame).all()
@@ -245,27 +245,29 @@ def calculate_accuracy(
     print(f"Accuracy: {accuracy:.2%}")
     return float(accuracy)
 
+workflow_outputs = NamedTuple(
+    "WorkflowOutputs", model=FlyteFile[Literal["csv"]], accuracy=float)
 
 @workflow
 def diabetes_xgboost_pipeline(
     dataset_file: FlyteFile[
-        typing.TypeVar("csv")
+        Literal["csv"]
     ] = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv",
-    test_split_ratio: float = 0.33,
+    test_split_ratio: float = 0.20,
     seed: int = 7,
 ) -> workflow_outputs:
     """
-    Diabetes prediction pipeline using the XGBoost model. The function implements the
-    training and testing process of a diabetes prediction model using a dataset. It performs
-    data splitting, model training, predictions, and evaluates the accuracy of predictions.
+    The function `diabetes_xgboost_pipeline` implements a machine learning pipeline for
+    the diabetes dataset using the XGBoost model. This pipeline involves splitting the
+    dataset into training and testing sets, training an XGBoost model on the training
+    data, making predictions on the testing data, and calculating the accuracy of
+    the predictions. The pipeline can be adjusted using configurable parameters for
+    the dataset, test split ratio, and random seed.
 
-    :param dataset_file: Input dataset file, expected to be in CSV format.
-        The dataset is used to train and test the diabetes prediction model.
-    :param test_split_ratio: Ratio of test data split from the dataset. Should
-        be a float value between 0 and 1.
-    :param seed: Random seed used for reproducibility during data splitting.
-    :return: A tuple consisting of the trained model file path and the
-        accuracy of the model on the test set.
+    :param dataset_file: A FlyteFile object representing the CSV file containing the dataset.
+    :param test_split_ratio: A float value representing the proportion of the dataset to be used for testing.
+    :param seed: An integer representing the seed value for random generator to ensure reproducibility.
+    :return: A tuple where the first element is the trained model file, and the second is the computed accuracy of the model.
     """
     train_features, test_features, train_labels, test_labels = split_train_test_dataset(
         dataset_file=dataset_file, seed=seed, test_split_ratio=test_split_ratio
@@ -279,7 +281,7 @@ def diabetes_xgboost_pipeline(
         features=test_features, model_file=trained_model.model
     )
     accuracy = calculate_accuracy(predictions=predictions, actual_labels=test_labels)
-    return trained_model.model, accuracy
+    return workflow_outputs(model=trained_model.model, accuracy=accuracy)
 
 
 if __name__ == "__main__":
