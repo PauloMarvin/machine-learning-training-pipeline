@@ -1,27 +1,18 @@
 from typing import List, Literal, NamedTuple, Tuple
-
 import joblib
 import pandas as pd
 from flytekit import Resources, task, workflow
 from flytekit.types.file import FlyteFile
 from flytekit.types.structured import StructuredDataset
 from xgboost import XGBClassifier
-
+from app.core.model_hyperparams.xgboost_model_hyperparams import XGBoostModelHyperparams
 from app.core.dataframe_utils import DataFrameUtils
 
-# DATASET_COLUMNS = OrderedDict(
-#     {
-#         "#preg": int,
-#         "pgc_2h": int,
-#         "diastolic_bp": int,
-#         "tricep_skin_fold_mm": int,
-#         "serum_insulin_2h": int,
-#         "bmi": float,
-#         "diabetes_pedigree": float,
-#         "age": int,
-#         "class": int,
-#     }
-# )
+MODELSER_JOBLIB = Literal["joblib.dat"]
+model_file_joblib = NamedTuple("Model", model=FlyteFile[MODELSER_JOBLIB])
+workflow_outputs = NamedTuple(
+    "WorkflowOutputs", model=FlyteFile[MODELSER_JOBLIB], accuracy=float
+)
 
 
 @task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
@@ -32,8 +23,6 @@ def split_train_test_dataset(
     column_names: List[str],
     target_label_column_index: int,
 ) -> Tuple[StructuredDataset, StructuredDataset, StructuredDataset, StructuredDataset]:
-
-    # column_names = list(DATASET_COLUMNS.keys())
     print(f"Column names: {column_names}")
     df = pd.read_csv(dataset_file, names=column_names)
 
@@ -50,15 +39,6 @@ def split_train_test_dataset(
         StructuredDataset(dataframe=train_labels),
         StructuredDataset(dataframe=test_labels),
     )
-
-
-MODELSER_JOBLIB = Literal["joblib.dat"]
-model_file_joblib = NamedTuple("Model", model=FlyteFile[MODELSER_JOBLIB])
-workflow_outputs = NamedTuple(
-    "WorkflowOutputs", model=FlyteFile[MODELSER_JOBLIB], accuracy=float
-)
-
-from app.core.model_hyperparams.xgboost_model_hyperparams import XGBoostModelHyperparams
 
 
 @task(cache_version="1.0", cache=False, limits=Resources(mem="200Mi"))
@@ -112,21 +92,6 @@ def calculate_accuracy(
     return float(accuracy)
 
 
-COLUMNS_NAMES = [
-    "#preg",
-    "pgc_2h",
-    "diastolic_bp",
-    "tricep_skin_fold_mm",
-    "serum_insulin_2h",
-    "bmi",
-    "diabetes_pedigree",
-    "age",
-    "class",
-]
-
-TARGET_LABEL_INDEX = 8
-
-
 @workflow
 def diabetes_xgboost_pipeline(
     column_names: List[str],
@@ -157,6 +122,20 @@ def diabetes_xgboost_pipeline(
 
 
 if __name__ == "__main__":
+    COLUMNS_NAMES = [
+        "#preg",
+        "pgc_2h",
+        "diastolic_bp",
+        "tricep_skin_fold_mm",
+        "serum_insulin_2h",
+        "bmi",
+        "diabetes_pedigree",
+        "age",
+        "class",
+    ]
+
+    TARGET_LABEL_INDEX = 8
+
     print("Running main pipeline...")
     print(
         diabetes_xgboost_pipeline(
